@@ -1,0 +1,90 @@
+import './styles/app.css';
+import { App } from './app/app';
+import { makeHooks, registerCommands } from './app/actions';
+import { FileOps } from './app/fileops';
+import { StartScreen, bindAccountMenu, refreshAccount } from './app/start';
+import { TaskPane, recentItems } from './app/taskpane';
+import { AssistantPanel } from './assistant/panel';
+import { normalizeSettings } from './app/settings';
+import { KV_SETTINGS_KEY, kvGet, kvSet, loadPuter, puter } from './platform/puter';
+import { applyTheme } from './platform/theme';
+import { installLongPressContextMenu } from './ui/longpress';
+import { toast } from './ui/overlay';
+
+const SETTINGS_KEY = 'parametric:settings';
+
+function localSettings(): unknown {
+  try {
+    return JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+  } catch {
+    return {};
+  }
+}
+
+async function boot() {
+  applyTheme();
+  const root = document.getElementById('app')!;
+  const app = new App();
+  const files = new FileOps(app);
+  registerCommands(app, files);
+  const hooks = makeHooks(app);
+  let start: StartScreen | null = null;
+  hooks.recent = () => recentItems(app, files);
+  hooks.gettingStarted = () => app.openTaskPane('help');
+  hooks.afterLoad = () => start?.hide();
+  hooks.saveSettings = (s) => {
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch { /* storage unavailable */ }
+    // One small KV entry for all settings, written only on change.
+    void kvSet(KV_SETTINGS_KEY, s);
+  };
+  try {
+    app.mount(root, hooks);
+  } catch (e) {
+    console.error(e);
+    root.removeAttribute('aria-busy');
+    return;
+  }
+  installLongPressContextMenu();
+  app.applySettings(localSettings());
+  // Preferences changed in another tab: apply them, so a change made here
+  // does not write this tab's older copy over them.
+  window.addEventListener('storage', (e) => {
+    if (e.key !== SETTINGS_KEY) return;
+    const next = normalizeSettings(localSettings(), app.settings);
+    const patch = Object.fromEntries(Object.entries(next).filter(([k, v]) => app.settings[k as keyof typeof next] !== v));
+    if (Object.keys(patch).length) app.changeSettings(patch);
+  });
+  app.loadRemoteSettings = () => app.loadSettings(() => kvGet<unknown>(KV_SETTINGS_KEY));
+  // Development builds expose the app for debugging and browser tests.
+  if (import.meta.env.DEV) (window as unknown as { __parametric: App }).__parametric = app;
+  const taskPane = new TaskPane(app, files, new AssistantPanel(app));
+  // The assistant starts open wherever it docks beside the viewport; on
+  // tablets and phones it would cover the model, so it waits to be opened.
+  // No focus, so single-key shortcuts keep working.
+  if (matchMedia('(min-width: 981px)').matches) taskPane.open('assistant', false);
+  start = new StartScreen(app, files);
+  bindAccountMenu(app);
+  root.removeAttribute('aria-busy');
+  app.newDocument('Part1');
+  const startupDocument = app.documentSignal;
+
+  await loadPuter();
+  void refreshAccount(app);
+  void app.loadRemoteSettings();
+  files.handleLaunchItems();
+  files.handleWindowClose();
+  const launched = !!puter()?.ui?.wasLaunchedWithItems?.();
+  const restored = launched || startupDocument.aborted ? false : await files.checkRecovery();
+  if (!restored && !launched && !startupDocument.aborted && !app.store.dirty && !app.panel?.edited) start.show();
+}
+
+window.addEventListener('unhandledrejection', (e) => {
+  const msg = (e.reason as Error)?.message ?? String(e.reason ?? '');
+  if (/ResizeObserver|AbortError/.test(msg)) return;
+  console.error(e.reason);
+});
+
+boot().catch((e) => {
+  console.error(e);
+  toast({ kind: 'error', title: 'Parametric could not start', message: (e as Error).message, timeout: 0 });
+});

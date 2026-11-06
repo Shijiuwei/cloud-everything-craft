@@ -1,0 +1,5 @@
+title: "cloud-everything-craft"
+description: "Next-generation runtime and extended toolchain for everything: We're rebuilding and open-sourcing the world’s software from scratch."
+theme: jekyll-theme-cayman
+plugins:
+  - jekyll-relative-links
